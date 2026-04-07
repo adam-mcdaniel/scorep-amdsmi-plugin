@@ -10,6 +10,7 @@
 #include <time.h>
 #include <linux/unistd.h>
 #include <sys/syscall.h>
+#include <dlfcn.h>
 
 #include <amd_smi/amdsmi.h>
 
@@ -81,6 +82,38 @@ static int violation_poller_running = 0;
 
 static pthread_mutex_t lock;
 
+static amdsmi_status_t (*dyn_amdsmi_init)(uint64_t) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_socket_handles)(uint32_t*, amdsmi_socket_handle*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_processor_handles)(amdsmi_socket_handle, uint32_t*, amdsmi_processor_handle*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_processor_type)(amdsmi_processor_handle, processor_type_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_gpu_metrics_info)(amdsmi_processor_handle, amdsmi_gpu_metrics_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_energy_count)(amdsmi_processor_handle, uint64_t*, float*, uint64_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_power_info)(amdsmi_processor_handle, amdsmi_power_info_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_temp_metric)(amdsmi_processor_handle, amdsmi_temperature_type_t, amdsmi_temperature_metric_t, int64_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_clock_info)(amdsmi_processor_handle, amdsmi_clk_type_t, amdsmi_clk_info_t*) = NULL;
+static amdsmi_status_t (*dyn_amdsmi_get_gpu_activity)(amdsmi_processor_handle, amdsmi_engine_usage_t*) = NULL;
+
+static int load_isolated_amd_smi() {
+    void *handle = dlopen("libamd_smi.so", RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+    if (!handle) {
+        fprintf(stderr, "Score-P AMD SMI Plugin: Fallo al cargar libamd_smi.so aislada: %s\n", dlerror());
+        return -1;
+    }
+    dyn_amdsmi_init = dlsym(handle, "amdsmi_init");
+    dyn_amdsmi_get_socket_handles = dlsym(handle, "amdsmi_get_socket_handles");
+    dyn_amdsmi_get_processor_handles = dlsym(handle, "amdsmi_get_processor_handles");
+    dyn_amdsmi_get_processor_type = dlsym(handle, "amdsmi_get_processor_type");
+    dyn_amdsmi_get_gpu_metrics_info = dlsym(handle, "amdsmi_get_gpu_metrics_info");
+    dyn_amdsmi_get_energy_count = dlsym(handle, "amdsmi_get_energy_count");
+    dyn_amdsmi_get_power_info = dlsym(handle, "amdsmi_get_power_info");
+    dyn_amdsmi_get_temp_metric = dlsym(handle, "amdsmi_get_temp_metric");
+    dyn_amdsmi_get_clock_info = dlsym(handle, "amdsmi_get_clock_info");
+    dyn_amdsmi_get_gpu_activity = dlsym(handle, "amdsmi_get_gpu_activity");
+
+    if (!dyn_amdsmi_init || !dyn_amdsmi_get_socket_handles) return -1;
+    return 0;
+}
+
 static size_t parse_buffer_size(const char *s) {
     char *tmp = NULL;
     size_t size = strtoll(s, &tmp, 10);
@@ -94,6 +127,8 @@ void set_pform_wtime_function(uint64_t(*pform_wtime)(void)) { wtime = pform_wtim
 
 int32_t init_amd_smi(void)
 {
+    if (load_isolated_amd_smi() != 0) return -1;
+
     char * env_string;
     pthread_mutex_init(&lock, NULL);
 
@@ -110,26 +145,26 @@ int32_t init_amd_smi(void)
 #endif
     if (env_string != NULL) buf_size = parse_buffer_size(env_string);
 
-    if (amdsmi_init(AMDSMI_INIT_AMD_GPUS) != AMDSMI_STATUS_SUCCESS) return -1;
+    if (dyn_amdsmi_init(AMDSMI_INIT_AMD_GPUS) != AMDSMI_STATUS_SUCCESS) return -1;
 
     uint32_t socket_count = 0;
-    amdsmi_get_socket_handles(&socket_count, NULL);
+    dyn_amdsmi_get_socket_handles(&socket_count, NULL);
     if (socket_count == 0) return -1;
     
     amdsmi_socket_handle *sockets = malloc(socket_count * sizeof(amdsmi_socket_handle));
-    amdsmi_get_socket_handles(&socket_count, sockets);
+    dyn_amdsmi_get_socket_handles(&socket_count, sockets);
 
     num_all_handles = 0;
     for (uint32_t s = 0; s < socket_count; s++) {
         uint32_t p_count = 0;
-        amdsmi_get_processor_handles(sockets[s], &p_count, NULL);
+        dyn_amdsmi_get_processor_handles(sockets[s], &p_count, NULL);
         if (p_count > 0) {
             amdsmi_processor_handle *procs = malloc(p_count * sizeof(amdsmi_processor_handle));
-            amdsmi_get_processor_handles(sockets[s], &p_count, procs);
+            dyn_amdsmi_get_processor_handles(sockets[s], &p_count, procs);
             
             for (uint32_t i = 0; i < p_count && num_all_handles < 64; i++) {
                 processor_type_t ptype;
-                if (amdsmi_get_processor_type(procs[i], &ptype) == AMDSMI_STATUS_SUCCESS) {
+                if (dyn_amdsmi_get_processor_type(procs[i], &ptype) == AMDSMI_STATUS_SUCCESS) {
                     if (ptype == AMDSMI_PROCESSOR_TYPE_AMD_GPU) {
                         all_handles[num_all_handles] = procs[i];
                         memset(&cached_violations[num_all_handles], 0, sizeof(amdsmi_violation_status_t));
@@ -178,7 +213,7 @@ void * violation_poller_thread_func(void * arg)
             amdsmi_gpu_metrics_t metrics;
             memset(&metrics, 0, sizeof(metrics));
             
-            if (amdsmi_get_gpu_metrics_info(all_handles[i], &metrics) == AMDSMI_STATUS_SUCCESS) {
+            if (dyn_amdsmi_get_gpu_metrics_info(all_handles[i], &metrics) == AMDSMI_STATUS_SUCCESS) {
                 cached_violations[i].acc_hbm_thrm     = metrics.hbm_thm_residency_acc;
                 cached_violations[i].acc_ppt_pwr      = metrics.ppt_residency_acc;
                 cached_violations[i].acc_prochot_thrm = metrics.prochot_residency_acc;
@@ -192,7 +227,9 @@ void * violation_poller_thread_func(void * arg)
     return NULL;
 }
 
-void fini(void) { amdsmi_shut_down(); }
+void fini(void) {
+    amdsmi_shut_down();
+}
 
 void * thread_report(void * _id)
 {
@@ -229,7 +266,7 @@ void * thread_report(void * _id)
                     switch(ev->metric_types[i]) {
                         case AMDSMI_METRIC_ENERGY: {
                             uint64_t energy = 0, ts = 0; float res = 0;
-                            if (amdsmi_get_energy_count(ph, &energy, &res, &ts) == AMDSMI_STATUS_SUCCESS) {
+                            if (dyn_amdsmi_get_energy_count(ph, &energy, &res, &ts) == AMDSMI_STATUS_SUCCESS) {
                                 uint64_t candidate_val = (uint64_t)((double)energy * (double)res);
                                 
                                 if (candidate_val >= ev->last_vals[i]) {
@@ -242,35 +279,34 @@ void * thread_report(void * _id)
                         }
                         case AMDSMI_METRIC_POWER: {
                             amdsmi_power_info_t pinfo;
-                            if (amdsmi_get_power_info(ph, &pinfo) == AMDSMI_STATUS_SUCCESS)
+                            if (dyn_amdsmi_get_power_info(ph, &pinfo) == AMDSMI_STATUS_SUCCESS)
                                 current_val = pinfo.average_socket_power;
                             break;
                         }
                         case AMDSMI_METRIC_TEMP: {
                             int64_t temp = 0;
-                            if (amdsmi_get_temp_metric(ph, AMDSMI_TEMPERATURE_TYPE_HOTSPOT, AMDSMI_TEMP_CURRENT, &temp) == AMDSMI_STATUS_SUCCESS)
+                            if (dyn_amdsmi_get_temp_metric(ph, AMDSMI_TEMPERATURE_TYPE_HOTSPOT, AMDSMI_TEMP_CURRENT, &temp) == AMDSMI_STATUS_SUCCESS)
                                 current_val = temp;
                             break;
                         }
                         case AMDSMI_METRIC_GFXCLK: {
                             amdsmi_clk_info_t clk;
-                            if (amdsmi_get_clock_info(ph, AMDSMI_CLK_TYPE_GFX, &clk) == AMDSMI_STATUS_SUCCESS)
+                            if (dyn_amdsmi_get_clock_info(ph, AMDSMI_CLK_TYPE_GFX, &clk) == AMDSMI_STATUS_SUCCESS)
                                 current_val = clk.clk;
                             break;
                         }
                         case AMDSMI_METRIC_BUSY: {
                             amdsmi_engine_usage_t usage;
-                            if (amdsmi_get_gpu_activity(ph, &usage) == AMDSMI_STATUS_SUCCESS)
+                            if (dyn_amdsmi_get_gpu_activity(ph, &usage) == AMDSMI_STATUS_SUCCESS)
                                 current_val = usage.gfx_activity;
                             break;
                         }
                         case AMDSMI_METRIC_MEM_BUSY: {
                             amdsmi_engine_usage_t usage;
-                            if (amdsmi_get_gpu_activity(ph, &usage) == AMDSMI_STATUS_SUCCESS)
+                            if (dyn_amdsmi_get_gpu_activity(ph, &usage) == AMDSMI_STATUS_SUCCESS)
                                 current_val = usage.umc_activity;
                             break;
                         }
-                        /* --- Lecturas asíncronas desde el caché --- */
                         case AMDSMI_METRIC_ACC_HBM_THRM_VIOLATION:
                             current_val = cached_violations[dev].acc_hbm_thrm; break;
                         case AMDSMI_METRIC_ACC_PPT_PWR_VIOLATION:

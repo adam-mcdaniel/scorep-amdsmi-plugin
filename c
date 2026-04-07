@@ -27,6 +27,8 @@ cmake .. \
     -DCMAKE_CXX_COMPILER=/opt/rocm-7.2.0/llvm/bin/clang++ \
     -DCMAKE_INSTALL_PREFIX=/home/hom/scorep-amd/install \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,nodelete" \
+    -DCMAKE_MODULE_LINKER_FLAGS="-Wl,-z,nodelete"
     
 echo "Installing to $INSTALL_DIR"
 gmake clean

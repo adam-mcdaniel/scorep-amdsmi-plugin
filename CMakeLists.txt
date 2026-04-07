@@ -21,7 +21,7 @@ set(CMAKE_C_FLAGS_RELEASE "-Os")
 if(BACKEND_SCOREP)
     include(common/FindScorep.cmake)
     if(SCOREP_FOUND)
-	target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${SCOREP_INCLUDE_DIRS})
+        target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${SCOREP_INCLUDE_DIRS})
         target_compile_definitions(${PROJECT_NAME} PRIVATE "-DBACKEND_SCOREP")
     else()
         message("Score-P was not found, falling back to VampirTrace!")
@@ -45,10 +45,8 @@ if(LINK_WITH_PAPI)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${PAPI_LIBRARIES})
 endif()
 
-# Asegurar que el enlazador busque en el directorio de bibliotecas de ROCm
-target_link_directories(amd_smi_plugin PRIVATE /opt/rocm-7.2.0/lib)
+#target_link_directories(${PROJECT_NAME} PRIVATE /opt/rocm-7.2.0/lib)
 
-# Enlazar explícitamente la biblioteca libamd_smi.so
-target_link_libraries(amd_smi_plugin PRIVATE amd_smi)
+target_link_libraries(amd_smi_plugin PRIVATE dl)
 
 install(TARGETS ${PROJECT_NAME} LIBRARY DESTINATION lib)
