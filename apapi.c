@@ -228,7 +228,6 @@ void * violation_poller_thread_func(void * arg)
 }
 
 void fini(void) {
-    amdsmi_shut_down();
 }
 
 void * thread_report(void * _id)
